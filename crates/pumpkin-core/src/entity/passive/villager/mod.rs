@@ -60,6 +60,9 @@ pub(crate) fn trigger_trade_advancement(player: &Player) {
     );
 }
 
+/// Vanilla `VillagerData.NEXT_LEVEL_XP_THRESHOLDS`, indexed by the current level.
+const NEXT_LEVEL_XP_THRESHOLDS: [i32; 5] = [0, 10, 70, 150, 250];
+
 fn enchanted_book_offer_items(
     rng: &mut impl rand::Rng,
 ) -> Option<(ItemStack, ItemStack, Option<ItemStack>)> {
@@ -344,10 +347,8 @@ pub struct VillagerEntity {
     pub inventory: std::sync::Mutex<Vec<ItemStack>>,
     pub merchant_inventory: Arc<SimpleInventory>,
     pub offers: std::sync::Mutex<Vec<pumpkin_protocol::java::client::play::MerchantOffer>>,
-    pub merchant_update_timer: AtomicI32,
     pub unhappy_counter: AtomicI32,
     pub trade_sound_cooldown: AtomicI32,
-    pub increase_profession_level_on_update: AtomicBool,
     pub last_traded_player: std::sync::Mutex<Option<Uuid>>,
     pub trading_player: std::sync::Mutex<Option<(Uuid, u8)>>,
     pub is_trading: AtomicBool,
@@ -413,10 +414,8 @@ impl VillagerEntity {
             inventory,
             merchant_inventory: Arc::new(SimpleInventory::new(3)),
             offers: std::sync::Mutex::new(Vec::new()),
-            merchant_update_timer: AtomicI32::new(0),
             unhappy_counter: AtomicI32::new(0),
             trade_sound_cooldown: AtomicI32::new(0),
-            increase_profession_level_on_update: AtomicBool::new(false),
             last_traded_player: std::sync::Mutex::new(None),
             trading_player: std::sync::Mutex::new(None),
             is_trading: AtomicBool::new(false),
@@ -866,37 +865,52 @@ impl VillagerEntity {
         };
 
         let current_xp = self.xp.fetch_add(xp_gain, Ordering::Relaxed) + xp_gain;
-        let villager_data = *self
+        let mut villager_data = *self
             .villager_data
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let bedrock_metadata = Self::bedrock_metadata(villager_data, current_xp);
-        self.get_entity()
-            .set_synced_data(tracked_data::villager::VILLAGER_DATA, villager_data);
-        self.get_entity().send_bedrock_actor_data(&bedrock_metadata);
+        let level = villager_data.level.0;
+        // Vanilla `Villager.rewardTradeXp`: 3 + [0, 4) XP, plus 5 on a level-up.
+        let mut pop_xp = 3 + rand::random_range(0..4u32);
 
-        if reward_exp {
-            ExperienceOrbEntity::spawn(world, self.get_entity().pos.load(), xp_gain as u32);
+        if (1..5).contains(&level)
+            && current_xp >= NEXT_LEVEL_XP_THRESHOLDS[usize::try_from(level).unwrap_or_default()]
+        {
+            villager_data.level.0 += 1;
+            self.set_villager_data(villager_data);
+            self.add_trades(villager_data.profession_enum(), villager_data.level.0);
+            self.mob_entity.living_entity.add_effect(Effect {
+                effect_type: &StatusEffect::REGENERATION,
+                duration: 200,
+                amplifier: 0,
+                ambient: false,
+                show_particles: true,
+                show_icon: true,
+                blend: false,
+            });
+            pop_xp += 5;
+        } else {
+            let bedrock_metadata = Self::bedrock_metadata(villager_data, current_xp);
+            self.get_entity()
+                .set_synced_data(tracked_data::villager::VILLAGER_DATA, villager_data);
+            self.get_entity().send_bedrock_actor_data(&bedrock_metadata);
         }
 
+        if reward_exp {
+            ExperienceOrbEntity::spawn(world, self.get_entity().pos.load(), pop_xp);
+        }
+
+        *self
+            .last_traded_player
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(player_uuid);
+
         if let Some(player) = world.get_player_by_uuid(player_uuid) {
-            {
-                let mut gossips = self
-                    .gossips
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let value = gossips
-                    .entry(player_uuid)
-                    .or_default()
-                    .entry(GossipType::Trading)
-                    .or_default();
-                *value = (*value + 2).min(GossipType::Trading.max_value());
-            };
-            self.resend_offers_to_player(&player);
+            self.send_updated_trade_offers(&player);
         }
     }
 
-    fn resend_offers_to_player(&self, player: &Arc<Player>) {
+    fn send_updated_trade_offers(&self, player: &Arc<Player>) {
         let trading_player = *self
             .trading_player
             .lock()
@@ -917,30 +931,9 @@ impl VillagerEntity {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        let ok = {
-            let screen = player
-                .current_screen_handler
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            let mut screen = screen
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if screen.sync_id() != sync_id {
-                false
-            } else if let Some(handler) =
-                screen.as_any_mut().downcast_mut::<MerchantScreenHandler>()
-            {
-                handler.offers.clone_from(&offers);
-                handler.update_result_slot();
-                true
-            } else {
-                false
-            }
-        };
-        if !ok {
-            return;
-        }
+        // The trade callback runs with the screen handler locked. The handler
+        // already increments its offer's uses and refreshes the result slot after
+        // the callback, so only send the updated offers to the client here.
         self.send_trade_offers(player, sync_id, &offers, villager_data);
     }
 
@@ -1613,33 +1606,6 @@ impl VillagerEntity {
                 pumpkin_data::entity::EntityStatus::VillagerHappy,
                 Some(ActorEventID::VillagerHappy),
             );
-        }
-
-        if !self.is_trading.load(Ordering::Relaxed)
-            && self.merchant_update_timer.load(Ordering::Relaxed) > 0
-            && self.merchant_update_timer.fetch_sub(1, Ordering::Relaxed) == 1
-        {
-            if self
-                .increase_profession_level_on_update
-                .swap(false, Ordering::Relaxed)
-            {
-                let mut data = *self
-                    .villager_data
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                data.level.0 += 1;
-                self.set_villager_data(data);
-                self.add_trades(data.profession_enum(), data.level.0);
-            }
-            self.mob_entity.living_entity.add_effect(Effect {
-                effect_type: &StatusEffect::REGENERATION,
-                duration: 200,
-                amplifier: 0,
-                ambient: false,
-                show_particles: true,
-                show_icon: true,
-                blend: false,
-            });
         }
 
         let (game_time, day_time, day) = {
@@ -2532,5 +2498,55 @@ mod tests {
             assert!((5..=19).contains(&additional_price));
             assert!(!enchantments.enchantment.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn trading_xp_raises_the_villager_level_and_adds_trades() {
+        use crate::entity::ai::test_support::world;
+
+        let temp_dir = tempfile::tempdir().expect("temporary world directory");
+        let world = world(&temp_dir);
+        tokio::task::yield_now().await;
+        let villager = VillagerEntity::new(Entity::new(
+            world.clone(),
+            Vector3::new(0.5, 64.0, 0.5),
+            &EntityType::VILLAGER,
+        ));
+        villager.set_villager_data(VillagerData::new(
+            VillagerType::Plains,
+            VillagerProfession::Farmer,
+            1,
+        ));
+        villager.generate_trades(VillagerProfession::Farmer, 1);
+        villager.xp.store(9, Ordering::Relaxed);
+
+        let offers_before = {
+            let mut offers = villager
+                .offers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let offer = offers.first_mut().expect("level 1 farmer trades");
+            offer.xp = 1;
+            offer.reward_exp = false;
+            offers.len()
+        };
+
+        villager.complete_trade(0, &world, Uuid::new_v4());
+
+        let data = *villager
+            .villager_data
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(data.level.0, 2);
+        assert_eq!(villager.xp.load(Ordering::Relaxed), 10);
+        assert!(
+            villager
+                .offers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len()
+                > offers_before,
+            "the new level's trades should be appended"
+        );
     }
 }
