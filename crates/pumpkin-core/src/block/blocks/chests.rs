@@ -17,7 +17,7 @@ use pumpkin_inventory::screen_handler::{
 };
 use pumpkin_macros::{pumpkin_block, pumpkin_block_from_tag};
 use pumpkin_util::GameMode;
-use pumpkin_util::math::position::BlockPos;
+use pumpkin_util::math::{boundingbox::BoundingBox, position::BlockPos};
 use pumpkin_util::text::TextComponent;
 use pumpkin_world::world::BlockFlags;
 use std::sync::Mutex;
@@ -29,6 +29,7 @@ use crate::block::{
     registry::BlockActionResult,
 };
 use crate::entity::EntityBase;
+use crate::entity::passive::cat::CatEntity;
 use crate::entity::player::Player;
 use crate::world::World;
 use crate::world::loot::{LootContextParameters, fill_chest_inventory_handle};
@@ -652,14 +653,26 @@ fn get_chest_properties_if_can_connect(
     None
 }
 
-fn is_chest_blocked(world: &World, block_pos: &BlockPos) -> bool {
-    // TODO: Block opening when a cat is sitting on top.
-    has_block_on_top(world, block_pos)
+const CAT_BLOCKING_BOX: BoundingBox = BoundingBox::new_array([0.0, 1.0, 0.0], [1.0, 2.0, 1.0]);
+
+pub(crate) fn is_chest_blocked(world: &World, block_pos: &BlockPos) -> bool {
+    has_block_on_top(world, block_pos) || has_sitting_cat_on_top(world, block_pos)
 }
+
 fn has_block_on_top(world: &World, block_pos: &BlockPos) -> bool {
     let above_pos = block_pos.up();
     let above_state = world.get_block_state(&above_pos);
     above_state.is_solid_block()
+}
+
+fn has_sitting_cat_on_top(world: &World, block_pos: &BlockPos) -> bool {
+    let search_box = CAT_BLOCKING_BOX.at_pos(*block_pos);
+    world.get_entities_at_box(&search_box).iter().any(|entity| {
+        entity
+            .cast_any()
+            .downcast_ref::<CatEntity>()
+            .is_some_and(CatEntity::is_sitting)
+    })
 }
 
 trait ChestTypeExt {
