@@ -192,6 +192,16 @@ fn verify_dimension_structure_starts(seed: u64, dim: Dimension, dump: &Dimension
                                 chunk_dump.z
                             );
                         }
+                        // The beardifier reads the piece's stored projection. Vanilla takes
+                        // it from the chosen element, so the two must never diverge.
+                        assert_eq!(
+                            jpiece.projection,
+                            jpiece.element.projection,
+                            "Piece {i} stored projection mismatch for {} at chunk ({}, {})",
+                            expected_start.structure,
+                            chunk_dump.x,
+                            chunk_dump.z
+                        );
                         if let Some(junctions) = piece_data.get("junctions").and_then(|j| j.as_array()) {
                             assert_eq!(
                                 jpiece.junctions.len(),

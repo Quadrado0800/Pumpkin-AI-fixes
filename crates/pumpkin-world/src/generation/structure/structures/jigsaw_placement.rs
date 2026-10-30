@@ -642,6 +642,7 @@ impl JigsawPlacement {
             center_z + max_distance_from_center.horizontal,
         );
 
+        let center_projection = center_element.projection;
         let center_piece = Box::new(PoolElementStructurePiece {
             piece: StructurePiece::new(StructurePieceType::Jigsaw, box_, 0),
             element: center_element,
@@ -652,7 +653,7 @@ impl JigsawPlacement {
             junctions: Vec::new(),
             ground_level_delta,
             liquid_settings,
-            projection: pool.elements[0].projection,
+            projection: center_projection,
         });
 
         let mut collector = super::StructurePiecesCollector::new();
