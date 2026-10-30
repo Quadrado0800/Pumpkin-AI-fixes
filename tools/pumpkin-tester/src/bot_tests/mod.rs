@@ -1,4 +1,5 @@
 mod block_tuning_and_invert;
+mod cat_chest;
 mod commands_and_gamemode;
 mod login_and_movement;
 mod loot_tables;
@@ -34,6 +35,8 @@ pub async fn run_bot_tests(
     loot_tables::run_loot_table_tests(server, &mut bot1, summary_lines).await?;
 
     world_interaction::run_world_interaction_tests(server, &mut bot1, summary_lines).await?;
+
+    cat_chest::run_cat_chest_test(server, &mut bot1, summary_lines).await?;
 
     sheep_shearing::run_sheep_shearing_test(server, summary_lines)?;
 
