@@ -150,17 +150,16 @@ impl MobMetadata {
         self
     }
 
-    /// Sets the collar color for tamed mobs (wolves, cats).
+    /// Sets the collar color for tamed mobs (wolves, cats). Each species keeps it in its own
+    /// `tracked` slot.
     #[must_use]
-    pub fn collar_color(mut self, color: DyeColor) -> Self {
+    pub fn collar_color(mut self, tracked: TrackedData, color: DyeColor) -> Self {
         self.bedrock_data.set(
             entity_data_key::COLOR_INDEX,
             MetadataValue::Byte(color.id() as i8),
         );
-        self.java_entries.push(JavaMetadataEntry::VarInt(
-            tracked_data::wolf::COLLAR_COLOR,
-            color.id() as i32,
-        ));
+        self.java_entries
+            .push(JavaMetadataEntry::VarInt(tracked, color.id() as i32));
         self
     }
 
@@ -536,6 +535,36 @@ mod tests {
                 _ => 0.0,
             }),
             Some(4.0)
+        );
+    }
+
+    #[test]
+    fn collar_color_uses_each_species_slot() {
+        let collar = |tracked| {
+            MobMetadata::new()
+                .collar_color(tracked, DyeColor::Red)
+                .java_entries
+                .iter()
+                .find_map(|entry| match entry {
+                    JavaMetadataEntry::VarInt(tracked, value) => Some((*tracked, *value)),
+                    _ => None,
+                })
+        };
+
+        assert_eq!(
+            collar(tracked_data::cat::CAT_COLLAR_COLOR),
+            Some((
+                tracked_data::cat::CAT_COLLAR_COLOR,
+                DyeColor::Red.id() as i32
+            ))
+        );
+        assert_eq!(
+            collar(tracked_data::wolf::COLLAR_COLOR),
+            Some((tracked_data::wolf::COLLAR_COLOR, DyeColor::Red.id() as i32))
+        );
+        assert_ne!(
+            tracked_data::cat::CAT_COLLAR_COLOR,
+            tracked_data::wolf::COLLAR_COLOR
         );
     }
 }
